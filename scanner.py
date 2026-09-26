@@ -5,14 +5,21 @@ scanner.py – Network Mapper · Point d'entrée principal
 
 Découvre tous les équipements actifs sur un réseau local via ARP,
 enrichit les données (hostname, fabricant OUI, ports ouverts),
-puis génère une cartographie interactive en HTML et exporte les données en JSON.
+puis restitue les résultats dans le(s) format(s) choisi(s).
+
+Formats de sortie disponibles (--format) :
+  html     → Cartographie interactive HTML avec vis.js  (défaut)
+  json     → Export JSON brut structuré
+  terminal → Affichage formaté directement dans le terminal
 
 Usage :
-  python scanner.py                              # Auto-détection du sous-réseau
-  python scanner.py -n 192.168.1.0/24            # Sous-réseau spécifié manuellement
-  python scanner.py --ports                      # + scan de ports (17 ports courants)
-  python scanner.py --ports -p 22,80,443,3389    # + liste de ports personnalisée
-  python scanner.py -n 10.0.0.0/24 --ports -o rapport.html
+  python scanner.py                                      # HTML, auto-détection
+  python scanner.py --format terminal                    # Affichage terminal seul
+  python scanner.py --format json                        # Export JSON seul
+  python scanner.py --format html json                   # HTML + JSON simultanément
+  python scanner.py --format html json terminal          # Les 3 formats à la fois
+  python scanner.py -n 192.168.1.0/24 --ports            # + scan de ports
+  python scanner.py --ports -p 22,80,443,3389            # + ports personnalisés
 """
 
 import argparse
@@ -23,11 +30,12 @@ import logging
 from datetime import datetime
 
 # --- Imports des modules locaux ---
-from modules.arp_scan       import arp_scan, get_local_subnet
-from modules.host_resolver  import resolve_hostname
-from modules.oui_lookup     import get_manufacturer
-from modules.port_scanner   import scan_ports
+from modules.arp_scan         import arp_scan, get_local_subnet
+from modules.host_resolver    import resolve_hostname
+from modules.oui_lookup       import get_manufacturer
+from modules.port_scanner     import scan_ports
 from modules.report_generator import generate_html_report
+from modules.terminal_display import display_results
 
 # ---------------------------------------------------------------------------
 # Configuration du logging
@@ -57,15 +65,37 @@ DEFAULT_PORTS = [
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="scanner.py",
-        description="🗺️  Network Mapper – Cartographie de réseau local",
+        description="Network Mapper - Cartographie de reseau local",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Formats de sortie :
+  html      Cartographie interactive HTML (vis.js)
+  json      Export JSON brut structure
+  terminal  Affichage formate dans le terminal
+
 Exemples :
-  python scanner.py
-  python scanner.py -n 192.168.1.0/24
-  python scanner.py --ports
-  python scanner.py -n 10.0.0.0/24 --ports -p 22,80,443,3389 -o map.html
+  python scanner.py                                    # HTML seul, auto-detection
+  python scanner.py --format terminal                  # Terminal seul
+  python scanner.py --format json                      # JSON seul
+  python scanner.py --format html json terminal        # Les 3 formats
+  python scanner.py -n 192.168.1.0/24 --ports          # Avec scan de ports
+  python scanner.py --format terminal --ports -p 22,80,443,3389
         """,
+    )
+
+    # Format(s) de sortie — plusieurs valeurs possibles
+    parser.add_argument(
+        "--format",
+        nargs="+",
+        metavar="FORMAT",
+        default=["html"],
+        choices=["html", "json", "terminal"],
+        help=(
+            "Format(s) de sortie (choix multiples possibles) : "
+            "html, json, terminal. "
+            "Defaut: html. "
+            "Exemple: --format html json terminal"
+        ),
     )
 
     # Réseau cible
@@ -73,7 +103,7 @@ Exemples :
         "-n", "--network",
         metavar="CIDR",
         default=None,
-        help="Sous-réseau cible (ex: 192.168.1.0/24). Auto-détecté si absent.",
+        help="Sous-reseau cible (ex: 192.168.1.0/24). Auto-detecte si absent.",
     )
 
     # Scan de ports
@@ -81,27 +111,27 @@ Exemples :
         "--ports",
         action="store_true",
         default=False,
-        help="Activer le scan de ports TCP (désactivé par défaut).",
+        help="Activer le scan de ports TCP (desactive par defaut).",
     )
     parser.add_argument(
         "-p", "--port-list",
         metavar="PORTS",
         default=None,
-        help=f"Ports à scanner, séparés par des virgules (défaut: {DEFAULT_PORTS}).",
+        help=f"Ports a scanner, separes par des virgules (defaut: {DEFAULT_PORTS}).",
     )
 
-    # Sorties
+    # Sorties fichiers
     parser.add_argument(
         "-o", "--output",
         metavar="FICHIER",
         default="output/map.html",
-        help="Fichier HTML de sortie (défaut: output/map.html).",
+        help="Fichier HTML de sortie (defaut: output/map.html).",
     )
     parser.add_argument(
         "-j", "--json-output",
         metavar="FICHIER",
         default="output/data.json",
-        help="Fichier JSON de sortie (défaut: output/data.json).",
+        help="Fichier JSON de sortie (defaut: output/data.json).",
     )
 
     # Timeouts et performance
@@ -250,28 +280,41 @@ def main() -> None:
         "port_list":     active_port_list,
     }
 
-    # ── Étape finale : Export JSON + HTML ─────────────────────────────────
-    _step(TOTAL_STEPS, TOTAL_STEPS, "Export des résultats…")
+    # ── Étape finale : Sortie selon le(s) format(s) choisi(s) ─────────────
+    formats  = set(args.format)
+    step_num = TOTAL_STEPS
+    _step(step_num, TOTAL_STEPS, f"Sortie : {', '.join(sorted(formats))}…")
 
-    # JSON
-    os.makedirs(os.path.dirname(args.json_output) or ".", exist_ok=True)
-    with open(args.json_output, "w", encoding="utf-8") as f:
-        json.dump({"metadata": metadata, "hosts": hosts}, f, indent=2, ensure_ascii=False)
-    log.info(f"  📄 JSON  : {os.path.abspath(args.json_output)}")
+    outputs_summary = []
 
-    # HTML
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-    generate_html_report(hosts, metadata, args.output)
-    log.info(f"  🌐 HTML  : {os.path.abspath(args.output)}")
+    # ── Format : JSON ──────────────────────────────────────────────────────
+    if "json" in formats:
+        os.makedirs(os.path.dirname(args.json_output) or ".", exist_ok=True)
+        with open(args.json_output, "w", encoding="utf-8") as f:
+            json.dump({"metadata": metadata, "hosts": hosts}, f, indent=2, ensure_ascii=False)
+        log.info(f"  JSON sauvegarde : {os.path.abspath(args.json_output)}")
+        outputs_summary.append(f"  JSON     : {os.path.abspath(args.json_output)}")
 
-    # ── Résumé final ──────────────────────────────────────────────────────
-    print()
-    print("╔══════════════════════════════════════════════════════╗")
-    print(f"║  ✅ Scan terminé  –  {len(hosts)} équipement(s) trouvé(s)")
-    print(f"║  📄 JSON  : {os.path.abspath(args.json_output)}")
-    print(f"║  🌐 HTML  : {os.path.abspath(args.output)}")
-    print("╚══════════════════════════════════════════════════════╝")
-    print()
+    # ── Format : HTML ──────────────────────────────────────────────────────
+    if "html" in formats:
+        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+        generate_html_report(hosts, metadata, args.output)
+        log.info(f"  HTML sauvegarde : {os.path.abspath(args.output)}")
+        outputs_summary.append(f"  HTML     : {os.path.abspath(args.output)}")
+
+    # ── Format : Terminal ──────────────────────────────────────────────────
+    if "terminal" in formats:
+        display_results(hosts, metadata)
+
+    # ── Résumé final (uniquement si pas terminal seul pour ne pas polluer) ─
+    if formats != {"terminal"}:
+        print()
+        print("=" * 58)
+        print(f"  Scan termine  -  {len(hosts)} equipement(s) trouve(s)")
+        for line in outputs_summary:
+            print(line)
+        print("=" * 58)
+        print()
 
 
 if __name__ == "__main__":
