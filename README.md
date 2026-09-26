@@ -188,9 +188,6 @@ La carte générée contient :
 
 ---
 
-
----
-
 ## 🔒 Notes légales et éthiques
 
 > ⚠️ **Scannez uniquement des réseaux dont vous avez l'autorisation.**
